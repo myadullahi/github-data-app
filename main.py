@@ -7,6 +7,9 @@ Run locally:
 - http://localhost:8000 — Chat UI
 - http://localhost:8000/docs — Swagger UI
 - http://localhost:8000/health — Service health (Milvus, OpenAI)
+
+Serverless (Vercel): rag (and pymilvus) are lazy-loaded so the function can start even if
+pymilvus is large or fails to load; /health and /chat then return a clear error instead of crashing.
 """
 import logging
 from contextlib import asynccontextmanager
@@ -17,9 +20,27 @@ from fastapi import FastAPI
 from fastapi.responses import FileResponse, HTMLResponse
 from pydantic import BaseModel
 
-import rag
-
 logger = logging.getLogger(__name__)
+
+# Lazy-load rag so pymilvus is not imported at app startup (avoids serverless crash from heavy/binary deps)
+_rag = None
+_rag_error = None
+
+
+def _get_rag():
+    """Import rag on first use; cache result or error so we don't crash the process."""
+    global _rag, _rag_error
+    if _rag is not None:
+        return _rag
+    if _rag_error is not None:
+        raise _rag_error
+    try:
+        import rag as _rag_module
+        _rag = _rag_module
+        return _rag
+    except Exception as e:
+        _rag_error = e
+        raise
 
 
 class ChatRequest(BaseModel):
@@ -87,6 +108,16 @@ def health():
     Health check for services used by the app.
     Returns status of Milvus (and collection) and OpenAI.
     """
+    try:
+        rag = _get_rag()
+    except Exception as e:
+        return {
+            "status": "degraded",
+            "services": {
+                "milvus": {"status": "error", "message": f"RAG module failed to load: {e!s}"},
+                "openai": {"status": "error", "message": "RAG module not loaded"},
+            },
+        }
     milvus = rag.check_milvus_health()
     openai_status = rag.check_openai_health()
     overall = "ok" if (milvus["status"] == "ok" and openai_status["status"] == "ok") else "degraded"
@@ -111,6 +142,14 @@ def chat(req: ChatRequest):
         return {"answer": "Please provide a non-empty question.", "sources": [], "reranked_chunks": []}
     if len(message) > MAX_CHAT_MESSAGE_CHARS:
         message = message[:MAX_CHAT_MESSAGE_CHARS]
+    try:
+        rag = _get_rag()
+    except Exception as e:
+        return {
+            "answer": f"RAG is not available (module failed to load: {e!s}). On serverless (e.g. Vercel), pymilvus may be too large or incompatible—consider a different host (Railway, Render, Fly.io) for full RAG.",
+            "sources": [],
+            "reranked_chunks": [],
+        }
     try:
         # Use more chunks (10) so answer-rich content is more likely included; LLM gets full content
         chunks = rag.hybrid_search(message, rerank_top=10)
