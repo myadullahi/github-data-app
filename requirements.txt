@@ -21,3 +21,7 @@ tqdm>=4.66.0
 # API server (local; deployment in phase 3)
 fastapi>=0.109.0
 uvicorn[standard]>=0.27.0
+
+# Tests (CI + local)
+pytest>=7.4.0
+httpx>=0.25.0

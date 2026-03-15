@@ -79,7 +79,7 @@ def chat(req: ChatRequest):
     """
     message = (req.message or "").strip()
     if not message:
-        return {"answer": "Please provide a non-empty question.", "sources": []}
+        return {"answer": "Please provide a non-empty question.", "sources": [], "reranked_chunks": []}
     try:
         # Use more chunks (10) so answer-rich content is more likely included; LLM gets full content
         chunks = rag.hybrid_search(message, rerank_top=10)

@@ -4,6 +4,20 @@ Use this as a **reference benchmark** when refining the reranking approach. No a
 
 ---
 
+## Five tests to run (before any code changes)
+
+Use these 5 tests as the core checklist when testing the RAG app (manual or later automated):
+
+| # | Test | Input (user asks) | Pass criteria |
+|---|------|-------------------|----------------|
+| **1** | **Spark Q&A chain** | (1) "give me top-3 questions asked in data engineering interview in spark" → (2) "what are the answers of these?" → (3) "what is the source repo name and link?" | Response has 3 questions, then substantive answers (not "context has no answers"), and each answer/source has a **specific GitHub URL** (no [1]/[2]). Final reply gives repo name and link. |
+| **2** | **Follow-up answers (no refusal)** | (1) "top-3 overall data engineering interview questions" → (2) "can you also give the answers to those questions" | Second response **provides the actual answers** from context (e.g. 4 V's, batch vs streaming, ACID or similar), with source URLs. Does **not** say "I'm unable to provide answers" or only point to repos. |
+| **3** | **Citations: full URLs + per-answer** | Any multi-part answer (e.g. top-3 questions with answers) | No generic "source: [1]" or "source: [2]". Every cited source is a **full GitHub URL** (e.g. https://github.com/owner/repo). When listing several Q&As, **each answer has its source directly after it**, not only a single sources section at the end. |
+| **4** | **Source diversity** | "give me top-3 data engineering questions on spark" (or similar list + answers) | Cited sources include **more than one repo** when the index has multiple relevant repos (e.g. not only andkret/Cookbook). Reranked chunks (logs or API) show multiple repos in the top set. |
+| **5** | **RAG-only (no general knowledge)** | (a) Ask something with a **specific phrase** that exists in only one indexed repo — answer should cite that repo and reflect that phrasing. (b) Ask something **not** in the indexed repos — response should say answer is not in context / cannot find it, **not** give a full answer from elsewhere. | Answers are grounded in retrieved context; when context is missing, the model says so instead of answering from general knowledge or "online" sources. |
+
+---
+
 ## Benchmark question chain 1
 
 Run this sequence and compare behavior as you improve retrieval/reranking:
