@@ -62,7 +62,12 @@ def _handle_request(handler_self):
         from mangum import Mangum
         from main import app
         mangum = Mangum(app, lifespan="auto")
-        response = asyncio.run(mangum(event, context))
+        result = mangum(event, context)
+        # Mangum may return a coroutine (async) or the response dict (sync)
+        if asyncio.iscoroutine(result):
+            response = asyncio.run(result)
+        else:
+            response = result
         status = int(response.get("statusCode", 500))
         headers = response.get("headers") or {}
         body = response.get("body") or ""
