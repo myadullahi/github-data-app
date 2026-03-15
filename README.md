@@ -99,6 +99,9 @@ python load_data.py --repos-file repos_verified.txt
 | `discover_repos.py` | Search repos by topic (and language, stars); write `owner/repo` to a file. |
 | `filter_repos.py` | Filter a repo list to only those that allow API access (no 403 on probe). |
 | `config.py` | Loads `.env` and exposes `OPENAI_API_KEY`, `MILVUS_URI`, `MILVUS_TOKEN`, `GITHUB_TOKEN`. |
+| `main.py` | FastAPI app: serves chat UI at `/`, `/health` (Milvus + OpenAI), `POST /chat` (RAG). |
+| `rag.py` | RAG: dense search in Milvus, answer with OpenAI using only retrieved context; health checks for Milvus and OpenAI. |
+| `BENCHMARK.md` | Reference benchmark Q&A for testing (e.g. Spark interview questions); used when refining reranking in Step 2. Output must cite specific GitHub repo URLs, not [1]/[2]. |
 
 ---
 
@@ -114,4 +117,20 @@ python discover_repos.py --topic data-engineering --language Python --max-repos 
 python load_data.py --repos-file repos.txt
 ```
 
-Next step: add a query/LLM layer that searches Milvus and uses OpenAI to answer over the loaded data.
+---
+
+## Running the API (local)
+
+Phase 2 runs the app as a FastAPI server on your machine (deployment in phase 3).
+
+```bash
+source venv/bin/activate
+pip install -r requirements.txt   # includes fastapi, uvicorn
+uvicorn main:app --reload --host 0.0.0.0 --port 8000
+```
+
+- **Root:** http://localhost:8000 → **Chat UI**: ask questions about your indexed repos; answers use only the RAG database (Milvus + OpenAI).
+- **Health:** http://localhost:8000/health → status of **Milvus** (connection, collection, row count) and **OpenAI** (API key check). The chat page shows these in the header and refreshes them periodically.
+- **Docs:** http://localhost:8000/docs (Swagger UI).
+
+The server checks that `OPENAI_API_KEY`, `MILVUS_URI`, and `MILVUS_TOKEN` are set in `.env` on startup. The chatbot uses the same collection as `load_data.py` (dense search only for now; sparse + reranker in a later step).

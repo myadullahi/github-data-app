@@ -1,0 +1,345 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>GitHub RAG — Ask your repos</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,400;0,9..40,500;0,9..40,600;0,9..40,700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --bg: #0f1419;
+      --surface: #1a2129;
+      --surface2: #242d38;
+      --text: #e6edf3;
+      --text-muted: #8b949e;
+      --accent: #58a6ff;
+      --accent-dim: #388bfd66;
+      --success: #3fb950;
+      --error: #f85149;
+      --radius: 10px;
+      --shadow: 0 4px 24px rgba(0,0,0,0.35);
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: 'DM Sans', system-ui, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      min-height: 100vh;
+      line-height: 1.5;
+    }
+    .layout {
+      max-width: 900px;
+      margin: 0 auto;
+      padding: 24px 20px 32px;
+    }
+    header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      flex-wrap: wrap;
+      gap: 16px;
+      margin-bottom: 24px;
+      padding-bottom: 16px;
+      border-bottom: 1px solid var(--surface2);
+    }
+    h1 {
+      font-size: 1.35rem;
+      font-weight: 600;
+      margin: 0;
+      letter-spacing: -0.02em;
+    }
+    .health-panel {
+      display: flex;
+      gap: 12px;
+      flex-wrap: wrap;
+    }
+    .health-item {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      padding: 6px 12px;
+      background: var(--surface);
+      border-radius: var(--radius);
+      font-size: 0.85rem;
+    }
+    .health-item .dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: var(--text-muted);
+    }
+    .health-item.ok .dot { background: var(--success); }
+    .health-item.error .dot { background: var(--error); }
+    .health-item .label { color: var(--text-muted); }
+    .instructions {
+      background: var(--surface);
+      border-radius: var(--radius);
+      padding: 16px 18px;
+      margin-bottom: 20px;
+      font-size: 0.9rem;
+      color: var(--text-muted);
+    }
+    .instructions strong { color: var(--text); }
+    .instructions ul { margin: 8px 0 0; padding-left: 20px; }
+    .chat-container {
+      background: var(--surface);
+      border-radius: var(--radius);
+      box-shadow: var(--shadow);
+      min-height: 320px;
+      display: flex;
+      flex-direction: column;
+    }
+    .chat-messages {
+      flex: 1;
+      padding: 20px;
+      overflow-y: auto;
+      max-height: 50vh;
+    }
+    .msg {
+      margin-bottom: 16px;
+    }
+    .msg.user { text-align: right; }
+    .msg .bubble {
+      display: inline-block;
+      max-width: 85%;
+      padding: 12px 16px;
+      border-radius: var(--radius);
+      text-align: left;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+    .msg.user .bubble {
+      background: var(--accent-dim);
+      color: var(--text);
+    }
+    .msg.assistant .bubble {
+      background: var(--surface2);
+      color: var(--text);
+    }
+    .msg .meta {
+      font-size: 0.75rem;
+      color: var(--text-muted);
+      margin-top: 4px;
+    }
+    .msg .sources {
+      margin-top: 10px;
+      padding-top: 8px;
+      border-top: 1px solid var(--surface2);
+      font-size: 0.85rem;
+      color: var(--text-muted);
+    }
+    .msg .sources a {
+      color: var(--accent);
+      text-decoration: none;
+    }
+    .msg .sources a:hover { text-decoration: underline; }
+    .chat-input-wrap {
+      padding: 16px 20px;
+      border-top: 1px solid var(--surface2);
+      display: flex;
+      gap: 10px;
+      align-items: flex-end;
+    }
+    #question {
+      flex: 1;
+      min-height: 44px;
+      max-height: 120px;
+      padding: 12px 14px;
+      font-family: inherit;
+      font-size: 0.95rem;
+      color: var(--text);
+      background: var(--surface2);
+      border: 1px solid transparent;
+      border-radius: var(--radius);
+      resize: none;
+      transition: border-color 0.2s;
+    }
+    #question:focus {
+      outline: none;
+      border-color: var(--accent);
+    }
+    #question::placeholder { color: var(--text-muted); }
+    #send {
+      padding: 12px 20px;
+      font-family: inherit;
+      font-size: 0.9rem;
+      font-weight: 600;
+      color: var(--bg);
+      background: var(--accent);
+      border: none;
+      border-radius: var(--radius);
+      cursor: pointer;
+      transition: opacity 0.2s;
+    }
+    #send:hover { opacity: 0.9; }
+    #send:disabled { opacity: 0.5; cursor: not-allowed; }
+    .loading {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      color: var(--text-muted);
+      font-size: 0.9rem;
+    }
+    .loading .spinner {
+      width: 18px;
+      height: 18px;
+      border: 2px solid var(--surface2);
+      border-top-color: var(--accent);
+      border-radius: 50%;
+      animation: spin 0.8s linear infinite;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    .error-msg { color: var(--error); font-size: 0.9rem; margin-top: 8px; }
+  </style>
+</head>
+<body>
+  <div class="layout">
+    <header>
+      <h1>GitHub RAG</h1>
+      <div class="health-panel" id="health-panel">
+        <div class="health-item" id="health-milvus">
+          <span class="dot"></span>
+          <span class="label">Milvus</span>
+          <span class="detail">—</span>
+        </div>
+        <div class="health-item" id="health-openai">
+          <span class="dot"></span>
+          <span class="label">OpenAI</span>
+          <span class="detail">—</span>
+        </div>
+      </div>
+    </header>
+
+    <section class="instructions">
+      <strong>How it works</strong>
+      <ul>
+        <li>Ask a question about the code or docs in the indexed GitHub repositories.</li>
+        <li>Answers are generated only from the retrieved context (no general knowledge).</li>
+        <li>If nothing relevant is found, the assistant will say so.</li>
+      </ul>
+    </section>
+
+    <div class="chat-container">
+      <div class="chat-messages" id="messages">
+        <div class="msg assistant">
+          <div class="bubble">Hi. Ask anything about the content in the loaded GitHub repos — I'll answer using only that data.</div>
+        </div>
+      </div>
+      <div class="chat-input-wrap">
+        <textarea id="question" rows="1" placeholder="Ask a question about your indexed repos…"></textarea>
+        <button type="button" id="send">Send</button>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    const messagesEl = document.getElementById('messages');
+    const questionEl = document.getElementById('question');
+    const sendBtn = document.getElementById('send');
+
+    function setHealth(id, ok, detail) {
+      const el = document.getElementById(id);
+      if (!el) return;
+      el.classList.toggle('ok', ok);
+      el.classList.toggle('error', !ok);
+      const d = el.querySelector('.detail');
+      if (d) d.textContent = detail || (ok ? 'OK' : 'Error');
+    }
+
+    async function fetchHealth() {
+      try {
+        const r = await fetch('/health');
+        const data = await r.json();
+        const services = data.services || {};
+        const m = services.milvus;
+        const milvusDetail = m?.status === 'ok' ? (m?.row_count != null ? m.row_count + ' rows' : 'OK') : (m?.message || '—');
+        setHealth('health-milvus', m?.status === 'ok', milvusDetail);
+        setHealth('health-openai', services.openai?.status === 'ok', services.openai?.message || '—');
+      } catch (e) {
+        setHealth('health-milvus', false, 'Unreachable');
+        setHealth('health-openai', false, 'Unreachable');
+      }
+    }
+
+    function appendMessage(role, content, isError, sources) {
+      const div = document.createElement('div');
+      div.className = 'msg ' + role;
+      const bubble = document.createElement('div');
+      bubble.className = 'bubble';
+      bubble.textContent = content;
+      if (isError) bubble.style.color = 'var(--error)';
+      div.appendChild(bubble);
+      if (sources && sources.length > 0) {
+        const srcEl = document.createElement('div');
+        srcEl.className = 'sources';
+        const escape = (t) => ('' + t).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+        srcEl.innerHTML = 'Sources: ' + sources.map(s => {
+          const url = (s.url || ('https://github.com/' + (s.repo || ''))).replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+          const label = escape(s.repo || url);
+          return '<a href="' + url + '" target="_blank" rel="noopener">' + label + '</a>';
+        }).join(', ');
+        div.appendChild(srcEl);
+      }
+      messagesEl.appendChild(div);
+      messagesEl.scrollTop = messagesEl.scrollHeight;
+    }
+
+    function setLoading(loading) {
+      sendBtn.disabled = loading;
+      if (loading) {
+        const wrap = document.createElement('div');
+        wrap.className = 'msg assistant';
+        wrap.id = 'loading-msg';
+        wrap.innerHTML = '<div class="bubble"><span class="loading"><span class="spinner"></span> Searching and answering…</span></div>';
+        messagesEl.appendChild(wrap);
+        messagesEl.scrollTop = messagesEl.scrollHeight;
+      } else {
+        const el = document.getElementById('loading-msg');
+        if (el) el.remove();
+      }
+    }
+
+    async function sendQuestion() {
+      const q = (questionEl.value || '').trim();
+      if (!q) return;
+      questionEl.value = '';
+      appendMessage('user', q);
+      setLoading(true);
+      try {
+        const r = await fetch('/chat', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ message: q })
+        });
+        const data = await r.json();
+        if (!r.ok) {
+          let errMsg = data.detail || data.message || 'Request failed';
+          if (Array.isArray(errMsg)) errMsg = errMsg.map(d => d.msg || d).join('; ');
+          else if (typeof errMsg === 'object') errMsg = JSON.stringify(errMsg);
+          appendMessage('assistant', errMsg, true);
+          return;
+        }
+        appendMessage('assistant', data.answer || 'No answer returned.', false, data.sources || []);
+      } catch (e) {
+        appendMessage('assistant', 'Network error: ' + e.message, true);
+      } finally {
+        setLoading(false);
+      }
+    }
+
+    sendBtn.addEventListener('click', sendQuestion);
+    questionEl.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' && !e.shiftKey) {
+        e.preventDefault();
+        sendQuestion();
+      }
+    });
+
+    fetchHealth();
+    setInterval(fetchHealth, 30000);
+  </script>
+</body>
+</html>
