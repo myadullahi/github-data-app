@@ -8,15 +8,18 @@ Run locally:
 - http://localhost:8000/docs — Swagger UI
 - http://localhost:8000/health — Service health (Milvus, OpenAI)
 """
+import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
 
 import config
 from fastapi import FastAPI
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, HTMLResponse
 from pydantic import BaseModel
 
 import rag
+
+logger = logging.getLogger(__name__)
 
 
 class ChatRequest(BaseModel):
@@ -31,7 +34,11 @@ def _check_env_on_startup():
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    _check_env_on_startup()
+    # Don't crash on missing env in serverless (e.g. Vercel); /health and /chat will show errors
+    try:
+        _check_env_on_startup()
+    except RuntimeError as e:
+        logger.warning("Startup env check failed (app will run degraded): %s", e)
     yield
 
 
@@ -48,10 +55,30 @@ ROOT = Path(__file__).resolve().parent
 MAX_CHAT_MESSAGE_CHARS = 8000
 
 
+def _index_path() -> Path:
+    """Path to index.html; try project root (main.py dir) and cwd for serverless."""
+    for base in (ROOT, Path.cwd(), Path.cwd() / ".."):
+        p = (base if base.is_absolute() else base.resolve()) / "templates" / "index.html"
+        if p.is_file():
+            return p
+    return ROOT / "templates" / "index.html"  # let it fail with clear error if missing
+
+
 @app.get("/", include_in_schema=False)
 def index():
     """Serve the chat UI."""
-    return FileResponse(ROOT / "templates" / "index.html", media_type="text/html")
+    path = _index_path()
+    if not path.is_file():
+        return HTMLResponse(
+            status_code=503,
+            content="""<!DOCTYPE html><html><head><title>GitHub RAG</title></head><body style="font-family:sans-serif;padding:2rem;max-width:600px;">
+<h1>Configuration needed</h1>
+<p>Either <code>templates/index.html</code> is missing in the deployment, or required env vars are not set.</p>
+<p>Set in Vercel: <strong>OPENAI_API_KEY</strong>, <strong>MILVUS_URI</strong>, <strong>MILVUS_TOKEN</strong>.</p>
+<p><a href="/health">/health</a> — check service status.</p>
+</body></html>""",
+        )
+    return FileResponse(path, media_type="text/html")
 
 
 @app.get("/health")
