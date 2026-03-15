@@ -17,8 +17,10 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import ast
 import base64
 import logging
+import re
 import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
@@ -43,6 +45,8 @@ EMBEDDING_DIM = 1536  # text-embedding-3-small
 LARGE_FILE_LINES = 400
 CHUNK_LINES = 350
 CHUNK_OVERLAP_LINES = 50
+# Chunk strategies: file (one chunk per small file / windows for large), function (Python ast), markdown (by ##), lines (always windows)
+CHUNK_STRATEGIES = ("file", "function", "markdown", "lines")
 # Concurrency and batching (tune for speed vs rate limits; reduce if you hit GitHub/OpenAI limits)
 GITHUB_FETCH_WORKERS = 10   # parallel blob fetches per repo
 # OpenAI embedding: 300k tokens per request total; each item ≤8k tokens → batch ≤37
@@ -66,12 +70,8 @@ def get_github_client():
     return Github(retry=None)  # unauthenticated: public only; no retry = no long backoff on 403
 
 
-def file_to_chunks(path: str, content: str, repo_id: str) -> list[tuple[str, str]]:
-    """
-    Turn one file into one or more (source, content) chunks for embedding.
-    - Small files: one chunk, source = github:repo_id:path.
-    - Large files: overlapping line windows, source = github:repo_id:path#Lstart-Lend.
-    """
+def _chunk_by_file(path: str, content: str, repo_id: str) -> list[tuple[str, str]]:
+    """Small files = one chunk; large files = overlapping line windows."""
     lines = content.splitlines()
     if len(lines) <= LARGE_FILE_LINES:
         return [(f"github:{repo_id}:{path}", content)]
@@ -86,6 +86,91 @@ def file_to_chunks(path: str, content: str, repo_id: str) -> list[tuple[str, str
         if end >= len(lines):
             break
     return out
+
+
+def _chunk_by_lines(path: str, content: str, repo_id: str) -> list[tuple[str, str]]:
+    """Always split into overlapping line windows (same as large-file behavior)."""
+    lines = content.splitlines()
+    if not lines:
+        return [(f"github:{repo_id}:{path}", content or " ")]
+    out = []
+    step = CHUNK_LINES - CHUNK_OVERLAP_LINES
+    for start in range(0, len(lines), step):
+        end = min(start + CHUNK_LINES, len(lines))
+        chunk_lines = lines[start:end]
+        chunk_content = "\n".join(chunk_lines)
+        line_spec = f"#L{start + 1}-L{end}"
+        out.append((f"github:{repo_id}:{path}{line_spec}", chunk_content))
+        if end >= len(lines):
+            break
+    return out
+
+
+def _chunk_by_markdown(path: str, content: str, repo_id: str) -> list[tuple[str, str]]:
+    """Split by markdown headings (## or ###). Each section becomes one chunk."""
+    lines = content.splitlines()
+    if not lines:
+        return [(f"github:{repo_id}:{path}", content or " ")]
+    # Section boundaries: line indices where a heading starts (## or ###); avoid duplicating 0
+    section_starts = [0]
+    for i, line in enumerate(lines):
+        if i > 0 and re.match(r"^#{2,6}\s", line.strip()):
+            section_starts.append(i)
+    section_starts.append(len(lines))
+    out = []
+    for j in range(len(section_starts) - 1):
+        start, next_start = section_starts[j], section_starts[j + 1]
+        chunk_lines = lines[start:next_start]
+        chunk_content = "\n".join(chunk_lines).strip()
+        if not chunk_content:
+            continue
+        line_spec = f"#L{start + 1}-L{next_start}"
+        out.append((f"github:{repo_id}:{path}{line_spec}", chunk_content))
+    if not out:
+        return [(f"github:{repo_id}:{path}", content)]
+    return out
+
+
+def _chunk_by_function(path: str, content: str, repo_id: str) -> list[tuple[str, str]]:
+    """Python: chunk by top-level function and class (ast). Other files: fall back to file strategy."""
+    ext = (Path(path).suffix or "").lower()
+    if ext != ".py":
+        return _chunk_by_file(path, content, repo_id)
+    try:
+        tree = ast.parse(content)
+    except SyntaxError:
+        return _chunk_by_file(path, content, repo_id)
+    out = []
+    for node in tree.body:
+        if isinstance(node, (ast.FunctionDef, ast.ClassDef)):
+            start = node.lineno - 1
+            end = node.end_lineno if hasattr(node, "end_lineno") and node.end_lineno else (start + 1)
+            chunk_lines = content.splitlines()[start:end]
+            chunk_content = "\n".join(chunk_lines)
+            line_spec = f"#L{start + 1}-L{end}"
+            out.append((f"github:{repo_id}:{path}{line_spec}", chunk_content))
+    if not out:
+        return _chunk_by_file(path, content, repo_id)
+    return out
+
+
+def file_to_chunks(
+    path: str,
+    content: str,
+    repo_id: str,
+    strategy: str = "file",
+) -> list[tuple[str, str]]:
+    """
+    Turn one file into one or more (source, content) chunks for embedding.
+    strategy: "file" (default), "function" (Python ast), "markdown" (by ##), "lines".
+    """
+    if strategy == "lines":
+        return _chunk_by_lines(path, content, repo_id)
+    if strategy == "markdown":
+        return _chunk_by_markdown(path, content, repo_id)
+    if strategy == "function":
+        return _chunk_by_function(path, content, repo_id)
+    return _chunk_by_file(path, content, repo_id)
 
 
 def _count_eligible_via_contents_api(repo) -> int:
@@ -403,6 +488,7 @@ def load_repos_to_milvus(
     embedding_model: str = EMBEDDING_MODEL,
     embedding_dim: int = EMBEDDING_DIM,
     max_files_per_repo: int = MAX_FILES_PER_REPO_DEFAULT,
+    chunk_strategy: str = "file",
 ) -> int:
     """Fetch GitHub files, embed, insert into Milvus. Returns number of rows inserted."""
     missing = config.check_env()
@@ -440,11 +526,11 @@ def load_repos_to_milvus(
                     milvus.delete(COLLECTION_NAME_SPARSE, filter=f'repo == "{safe}"')
             except Exception as e:
                 logger.debug("Delete existing repo rows: %s", e)
-        logger.info("Fetched %d files from %s; building chunks ...", len(files), repo_id)
+        logger.info("Fetched %d files from %s; building chunks (strategy=%s) ...", len(files), repo_id, chunk_strategy)
         sources = []
         contents = []
         for path, content in files:
-            for source, chunk_content in file_to_chunks(path, content, repo_id):
+            for source, chunk_content in file_to_chunks(path, content, repo_id, strategy=chunk_strategy):
                 sources.append(source)
                 contents.append(chunk_content[:65535])
         logger.info("Embedding %d chunks for %s (this may take a while) ...", len(contents), repo_id)
@@ -490,7 +576,7 @@ def load_repos_to_milvus(
                     pass
             _sources, _contents = [], []
             for _path, _content in _files:
-                for _src, _chunk in file_to_chunks(_path, _content, _repo_id):
+                for _src, _chunk in file_to_chunks(_path, _content, _repo_id, strategy=chunk_strategy):
                     _sources.append(_src)
                     _contents.append(_chunk[:65535])
             _vectors = embed_texts(openai_client, _contents, model=embedding_model)
@@ -516,10 +602,16 @@ def load_repos_to_milvus(
 
 
 def main():
-    ap = argparse.ArgumentParser(description="Load GitHub repo files into Milvus (chunk by file).")
+    ap = argparse.ArgumentParser(description="Load GitHub repo files into Milvus.")
     ap.add_argument("--repos", nargs="*", help="List of owner/repo")
     ap.add_argument("--repos-file", type=Path, help="Path to file with owner/repo per line")
     ap.add_argument("--collection", default=COLLECTION_NAME, help="Milvus collection name")
+    ap.add_argument(
+        "--chunk-strategy",
+        choices=CHUNK_STRATEGIES,
+        default="file",
+        help="Chunking strategy: file (one chunk per small file / windows for large), function (Python ast), markdown (by ##), lines (always windows). Default: file.",
+    )
     ap.add_argument(
         "--max-files-per-repo",
         type=int,
@@ -539,6 +631,7 @@ def main():
         repos,
         collection_name=args.collection,
         max_files_per_repo=args.max_files_per_repo,
+        chunk_strategy=args.chunk_strategy,
     )
     logger.info("Done. Total rows inserted: %s", n)
 

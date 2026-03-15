@@ -44,6 +44,8 @@ app = FastAPI(
 
 # Project root for template path
 ROOT = Path(__file__).resolve().parent
+# Cap user message length to avoid context flooding and token overflow (chat path)
+MAX_CHAT_MESSAGE_CHARS = 8000
 
 
 @app.get("/", include_in_schema=False)
@@ -80,6 +82,8 @@ def chat(req: ChatRequest):
     message = (req.message or "").strip()
     if not message:
         return {"answer": "Please provide a non-empty question.", "sources": [], "reranked_chunks": []}
+    if len(message) > MAX_CHAT_MESSAGE_CHARS:
+        message = message[:MAX_CHAT_MESSAGE_CHARS]
     try:
         # Use more chunks (10) so answer-rich content is more likely included; LLM gets full content
         chunks = rag.hybrid_search(message, rerank_top=10)
