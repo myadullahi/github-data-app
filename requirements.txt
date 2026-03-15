@@ -1,0 +1,19 @@
+# RAG app - GitHub data ingestion
+# Python 3.10+
+
+# Environment
+python-dotenv>=1.0.0
+
+# GitHub API (public repos; use token for higher rate limits)
+PyGithub>=2.1.0
+requests>=2.31.0
+
+# Vector DB (Milvus / Zilliz Cloud)
+pymilvus>=2.4.0
+
+# OpenAI (embeddings for RAG)
+openai>=1.0.0
+tiktoken>=0.6.0
+
+# Optional: async / progress
+tqdm>=4.66.0
