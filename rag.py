@@ -312,6 +312,8 @@ def answer_with_rag(query: str, chunks: list[dict[str, Any]]) -> tuple[str, list
         "If the answer cannot be found in the context, say so clearly. Do not use external knowledge. "
         "When citing sources, always use the full GitHub repo URL (e.g. https://github.com/owner/repo). "
         "Do not use generic references like [1] or source: [2]; use the actual URL. Keep answers concise.\n\n"
+        "If the user's question is ambiguous or could refer to multiple things in the context (e.g. 'what can this app do?' when context describes several different apps or repos), "
+        "ask for clarification before answering—for example which repo, which tool, or which feature they mean—so you do not assume and answer about the wrong one.\n\n"
         "Cite the source directly with each answer: for every question-answer pair or list item, put the source URL right after that answer (e.g. 'Source: https://github.com/owner/repo' or 'Source: https://github.com/owner/repo#anchor'). "
         "Do not only list sources in a separate section at the end—each answer should have its source immediately after it.\n\n"
         "Important: When the user asks for 'answers' to interview questions (or 'give me the answers', 'explain those', etc.), "

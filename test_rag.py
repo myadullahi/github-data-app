@@ -191,6 +191,47 @@ def test_health_returns_services(mock_milvus, mock_openai):
     assert "openai" in data["services"]
 
 
+# ----- Clarification when question is ambiguous -----
+
+
+@patch("rag.check_openai_health")
+@patch("rag.check_milvus_health")
+def test_system_prompt_asks_clarification_when_unclear(mock_milvus, mock_openai):
+    """System prompt must instruct the model to ask for more details when the question is ambiguous (e.g. 'this app')."""
+    mock_milvus.return_value = {"status": "ok"}
+    mock_openai.return_value = {"status": "ok"}
+
+    from fastapi.testclient import TestClient
+    import main
+
+    with patch("rag.hybrid_search") as mock_search:
+        mock_search.return_value = [
+            {"content": "Neum AI does X.", "source": "github:a/b:readme.md", "repo": "a/b"},
+            {"content": "This RAG app does Y.", "source": "github:c/d:readme.md", "repo": "c/d"},
+        ]
+        with patch("rag.get_openai_client") as mock_get_client:
+            mock_client = MagicMock()
+            mock_get_client.return_value = mock_client
+            # Capture the system prompt sent to the model
+            mock_client.chat.completions.create.return_value = MagicMock(
+                choices=[MagicMock(message=MagicMock(content="Which app do you mean—the one from repo a/b or c/d? Please specify so I can answer from the context."))]
+            )
+            client = TestClient(main.app)
+            r = client.post("/chat", json={"message": "what can this app do?"})
+    assert r.status_code == 200
+    data = r.json()
+    # Assert the system prompt passed to the LLM includes the clarification instruction
+    call_kwargs = mock_client.chat.completions.create.call_args[1]
+    messages = call_kwargs.get("messages", [])
+    system_content = next((m.get("content") or "" for m in messages if m.get("role") == "system"), "")
+    assert "clarif" in system_content.lower() or "ambiguous" in system_content.lower(), (
+        "System prompt must instruct the model to ask for clarification when the question is ambiguous"
+    )
+    # When the model returns a clarification question, the API should return it as the answer
+    answer = (data.get("answer") or "")
+    assert "which" in answer.lower() or "?" in answer, "Clarification response should be returned to the user"
+
+
 # ----- Topic presence (rubric: some topics must show up) -----
 
 
