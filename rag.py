@@ -311,14 +311,21 @@ def answer_with_rag(query: str, chunks: list[dict[str, Any]]) -> tuple[str, list
         "You are a helpful assistant that answers questions using ONLY the provided context from GitHub repository code and documentation. "
         "If the answer cannot be found in the context, say so clearly. Do not use external knowledge. "
         "When citing sources, always use the full GitHub repo URL (e.g. https://github.com/owner/repo). "
-        "Do not use generic references like [1] or source: [2]; use the actual URL. Keep answers concise."
+        "Do not use generic references like [1] or source: [2]; use the actual URL. Keep answers concise.\n\n"
+        "Cite the source directly with each answer: for every question-answer pair or list item, put the source URL right after that answer (e.g. 'Source: https://github.com/owner/repo' or 'Source: https://github.com/owner/repo#anchor'). "
+        "Do not only list sources in a separate section at the end—each answer should have its source immediately after it.\n\n"
+        "Important: When the user asks for 'answers' to interview questions (or 'give me the answers', 'explain those', etc.), "
+        "you MUST provide the actual answers from the context when the context contains them. Many context chunks are in Q&A format (question followed by answer). "
+        "Do NOT refuse with 'I am unable to provide answers' or only point to repositories when the context already includes the answer text. "
+        "Only say the answer is not in the context when it truly is missing."
     )
     user = (
         "Context from the knowledge base:\n\n"
         f"{context}\n\n"
         "---\n\n"
         f"Question: {query}\n\n"
-        "Answer using only the context above. Cite sources with the full GitHub URL."
+        "Answer using only the context above. If the user asked for answers to specific questions, provide those answers from the context when present. "
+        "For each question or list item, cite the source URL directly after that answer (e.g. Source: https://github.com/owner/repo)."
     )
     try:
         r = client.chat.completions.create(
