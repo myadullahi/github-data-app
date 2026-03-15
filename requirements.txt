@@ -22,6 +22,9 @@ tqdm>=4.66.0
 fastapi>=0.109.0
 uvicorn[standard]>=0.27.0
 
+# Vercel serverless (ASGI adapter)
+mangum>=0.17.0
+
 # Tests (CI + local)
 pytest>=7.4.0
 httpx>=0.25.0
