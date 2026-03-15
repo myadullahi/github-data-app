@@ -7,6 +7,8 @@ import json
 import traceback
 from http.server import BaseHTTPRequestHandler
 
+from mangum import Mangum
+
 
 def _parse_query(qs: str) -> dict:
     if not qs:
@@ -59,7 +61,6 @@ def _handle_request(handler_self):
     try:
         event = _build_event(handler_self)
         context = {}
-        from mangum import Mangum
         from main import app
         mangum = Mangum(app, lifespan="auto")
         response = asyncio.run(mangum(event, context))
