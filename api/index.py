@@ -4,6 +4,7 @@ We delegate to the FastAPI app via Mangum by building an API Gateway-style event
 """
 import asyncio
 import json
+import traceback
 from http.server import BaseHTTPRequestHandler
 
 
@@ -55,27 +56,36 @@ def _build_event(handler_self) -> dict:
 
 
 def _handle_request(handler_self):
-    event = _build_event(handler_self)
-    context = {}
-    from mangum import Mangum
-    from main import app
-    mangum = Mangum(app, lifespan="auto")
-    response = asyncio.run(mangum(event, context))
-    status = int(response.get("statusCode", 500))
-    headers = response.get("headers") or {}
-    body = response.get("body") or ""
-    if isinstance(body, dict):
-        body = json.dumps(body)
-    if not isinstance(body, (bytes, str)):
-        body = str(body)
-    if isinstance(body, str):
-        body = body.encode("utf-8")
-    handler_self.send_response(status)
-    for k, v in headers.items():
-        handler_self.send_header(k, str(v))
-    handler_self.send_header("Content-Length", str(len(body)))
-    handler_self.end_headers()
-    handler_self.wfile.write(body)
+    try:
+        event = _build_event(handler_self)
+        context = {}
+        from mangum import Mangum
+        from main import app
+        mangum = Mangum(app, lifespan="auto")
+        response = asyncio.run(mangum(event, context))
+        status = int(response.get("statusCode", 500))
+        headers = response.get("headers") or {}
+        body = response.get("body") or ""
+        if isinstance(body, dict):
+            body = json.dumps(body)
+        if not isinstance(body, (bytes, str)):
+            body = str(body)
+        if isinstance(body, str):
+            body = body.encode("utf-8")
+        handler_self.send_response(status)
+        for k, v in headers.items():
+            handler_self.send_header(k, str(v))
+        handler_self.send_header("Content-Length", str(len(body)))
+        handler_self.end_headers()
+        handler_self.wfile.write(body)
+    except Exception as e:
+        err_body = f"Handler error:\n{type(e).__name__}: {e}\n\n{traceback.format_exc()}"
+        err_bytes = err_body.encode("utf-8")
+        handler_self.send_response(500)
+        handler_self.send_header("Content-Type", "text/plain; charset=utf-8")
+        handler_self.send_header("Content-Length", str(len(err_bytes)))
+        handler_self.end_headers()
+        handler_self.wfile.write(err_bytes)
 
 
 class handler(BaseHTTPRequestHandler):
