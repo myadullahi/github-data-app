@@ -32,9 +32,11 @@ from tqdm import tqdm
 
 import config
 from repo_filters import is_text_file, should_skip_path
+from sparse_utils import text_to_sparse_vector
 
 # Defaults (override via env or args)
 COLLECTION_NAME = "github_rag"
+COLLECTION_NAME_SPARSE = "github_rag_sparse"
 EMBEDDING_MODEL = "text-embedding-3-small"
 EMBEDDING_DIM = 1536  # text-embedding-3-small
 # Meaningful code chunking: files longer than this (lines) are split into overlapping windows
@@ -321,6 +323,50 @@ def ensure_collection(client: MilvusClient, collection_name: str, dim: int):
     logger.info("Created collection %s (dim=%s, partition_key=repo, num_partitions=%s).", collection_name, dim, NUM_PARTITIONS)
 
 
+def _sparse_supported() -> bool:
+    """True if this pymilvus supports SPARSE_FLOAT_VECTOR (not supported on Zilliz Cloud as of 2024)."""
+    return getattr(DataType, "SPARSE_FLOAT_VECTOR", None) is not None
+
+
+def ensure_sparse_collection(client: MilvusClient, collection_name: str = COLLECTION_NAME_SPARSE) -> bool:
+    """
+    Create sparse-only collection if not exists (for hybrid search). Same partition key as main collection.
+    Returns True if sparse collection is available and was created or already exists; False if sparse not supported.
+    """
+    if not _sparse_supported():
+        logger.info("Sparse vectors not supported (e.g. Zilliz Cloud); skipping sparse collection.")
+        return False
+    if client.has_collection(collection_name):
+        logger.info("Sparse collection %s already exists.", collection_name)
+        return True
+    try:
+        schema = client.create_schema(auto_id=True, enable_dynamic_field=False)
+        schema.add_field(field_name="id", datatype=DataType.INT64, is_primary=True)
+        schema.add_field(field_name="sparse_vector", datatype=DataType.SPARSE_FLOAT_VECTOR)
+        schema.add_field(field_name="content", datatype=DataType.VARCHAR, max_length=65535)
+        schema.add_field(field_name="source", datatype=DataType.VARCHAR, max_length=2048)
+        schema.add_field(
+            field_name="repo",
+            datatype=DataType.VARCHAR,
+            max_length=512,
+            is_partition_key=True,
+        )
+        index_params = client.prepare_index_params()
+        index_params.add_index(field_name="id", index_type="STL_SORT")
+        index_params.add_index(field_name="sparse_vector", index_type="SPARSE_INVERTED_INDEX", metric_type="IP")
+        client.create_collection(
+            collection_name=collection_name,
+            schema=schema,
+            index_params=index_params,
+            num_partitions=NUM_PARTITIONS,
+        )
+        logger.info("Created sparse collection %s (partition_key=repo).", collection_name)
+        return True
+    except Exception as e:
+        logger.warning("Could not create sparse collection (server may not support sparse): %s", e)
+        return False
+
+
 def collection_has_repo_field(client: MilvusClient, collection_name: str) -> bool:
     """True if the collection schema includes the partition key field 'repo'."""
     try:
@@ -370,6 +416,7 @@ def load_repos_to_milvus(
     milvus = MilvusClient(uri=config.MILVUS_URI, token=config.MILVUS_TOKEN)
 
     ensure_collection(milvus, collection_name, embedding_dim)
+    use_sparse = ensure_sparse_collection(milvus, COLLECTION_NAME_SPARSE)
     use_repo_partition = collection_has_repo_field(milvus, collection_name)
     if not use_repo_partition:
         logger.warning("Collection %s has no 'repo' field (created before partitioning). Inserting without repo. Drop and re-run to use partitioning.", collection_name)
@@ -389,6 +436,8 @@ def load_repos_to_milvus(
             try:
                 safe = repo_id.replace("\\", "\\\\").replace('"', '\\"')
                 milvus.delete(collection_name, filter=f'repo == "{safe}"')
+                if use_sparse:
+                    milvus.delete(COLLECTION_NAME_SPARSE, filter=f'repo == "{safe}"')
             except Exception as e:
                 logger.debug("Delete existing repo rows: %s", e)
         logger.info("Fetched %d files from %s; building chunks ...", len(files), repo_id)
@@ -413,6 +462,15 @@ def load_repos_to_milvus(
                     row["repo"] = repo_id
                 batch.append(row)
             milvus.insert(collection_name, batch)
+            if use_sparse:
+                sparse_batch = []
+                for c, s in zip(contents[i : i + INSERT_BATCH_SIZE], sources[i : i + INSERT_BATCH_SIZE]):
+                    sp = text_to_sparse_vector(c)
+                    sparse_row = {"sparse_vector": sp, "content": c[:65535], "source": s}
+                    if use_repo_partition:
+                        sparse_row["repo"] = repo_id
+                    sparse_batch.append(sparse_row)
+                milvus.insert(COLLECTION_NAME_SPARSE, sparse_batch)
             total_inserted += len(batch)
         logger.info("Inserted %s rows from %s/%s", len(contents), owner, repo_name)
     # If nothing was inserted (e.g. all repos 403), try demo repo so the pipeline isn't empty
@@ -426,6 +484,8 @@ def load_repos_to_milvus(
             if use_repo_partition:
                 try:
                     milvus.delete(collection_name, filter=f'repo == "{_repo_id}"')
+                    if use_sparse:
+                        milvus.delete(COLLECTION_NAME_SPARSE, filter=f'repo == "{_repo_id}"')
                 except Exception:
                     pass
             _sources, _contents = [], []
@@ -442,6 +502,13 @@ def load_repos_to_milvus(
                         row["repo"] = _repo_id
                     batch.append(row)
                 milvus.insert(collection_name, batch)
+                if use_sparse:
+                    sparse_batch = []
+                    for c, s in zip(_contents[i:i + INSERT_BATCH_SIZE], _sources[i:i + INSERT_BATCH_SIZE]):
+                        sp = text_to_sparse_vector(c)
+                        sparse_row = {"sparse_vector": sp, "content": c[:65535], "source": s, "repo": _repo_id}
+                        sparse_batch.append(sparse_row)
+                    milvus.insert(COLLECTION_NAME_SPARSE, sparse_batch)
                 total_inserted += len(batch)
             logger.info("Inserted %s rows from demo repo %s", len(_contents), DEMO_REPO)
             break

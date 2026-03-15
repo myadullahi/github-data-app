@@ -31,8 +31,8 @@ RAG app that ingests public GitHub repo data into Milvus and lets you query it w
 ## Milvus / Zilliz Cloud
 
 - **Credentials:** Set `MILVUS_URI` and `MILVUS_TOKEN` in `.env`. Get them from Zilliz Cloud (Cluster → Connect, API Keys).
-- **Collection:** `load_data.py` creates the collection if it doesn’t exist. Schema: `id` (auto), `vector` (1536-dim), `content`, `source`, `repo` (partition key). Partitioning is by `repo` (64 partitions) for scoped search.
-- **Dense vectors only** (OpenAI embeddings). Sparse/hybrid can be added later if needed.
+- **Collections:** `load_data.py` creates the main collection `github_rag` (dense 1536-dim OpenAI embeddings) and, when supported, a sparse collection `github_rag_sparse` (BM25-style hash-based sparse vectors). Both use `content`, `source`, `repo` (partition key, 64 partitions).
+- **Sparse:** Milvus 2.4+ supports sparse vectors (`SPARSE_FLOAT_VECTOR`); the app creates `github_rag_sparse` and uses hybrid (dense + sparse) search when the server accepts it. Some hosted offerings (e.g. Zilliz Cloud) may not support sparse yet—if creation fails, the app falls back to dense-only and still reranks to top-5.
 
 ---
 
@@ -100,7 +100,8 @@ python load_data.py --repos-file repos_verified.txt
 | `filter_repos.py` | Filter a repo list to only those that allow API access (no 403 on probe). |
 | `config.py` | Loads `.env` and exposes `OPENAI_API_KEY`, `MILVUS_URI`, `MILVUS_TOKEN`, `GITHUB_TOKEN`. |
 | `main.py` | FastAPI app: serves chat UI at `/`, `/health` (Milvus + OpenAI), `POST /chat` (RAG). |
-| `rag.py` | RAG: dense search in Milvus, answer with OpenAI using only retrieved context; health checks for Milvus and OpenAI. |
+| `rag.py` | RAG: hybrid search (dense + sparse), RRF merge, embedding rerank to top-5, answer with OpenAI; health checks. |
+| `sparse_utils.py` | BM25-style sparse vectors (hash-based) for Milvus `github_rag_sparse` when supported. |
 | `BENCHMARK.md` | Reference benchmark Q&A for testing (e.g. Spark interview questions); used when refining reranking in Step 2. Output must cite specific GitHub repo URLs, not [1]/[2]. |
 
 ---
@@ -133,4 +134,4 @@ uvicorn main:app --reload --host 0.0.0.0 --port 8000
 - **Health:** http://localhost:8000/health → status of **Milvus** (connection, collection, row count) and **OpenAI** (API key check). The chat page shows these in the header and refreshes them periodically.
 - **Docs:** http://localhost:8000/docs (Swagger UI).
 
-The server checks that `OPENAI_API_KEY`, `MILVUS_URI`, and `MILVUS_TOKEN` are set in `.env` on startup. The chatbot uses the same collection as `load_data.py` (dense search only for now; sparse + reranker in a later step).
+The server checks that `OPENAI_API_KEY`, `MILVUS_URI`, and `MILVUS_TOKEN` are set in `.env` on startup. The chatbot uses **hybrid search** (dense + sparse when available), **RRF merge**, **embedding rerank** to top-5, then answers from those 5 chunks only.

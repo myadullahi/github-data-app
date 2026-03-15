@@ -1,5 +1,5 @@
 """
-RAG: search Milvus (dense) and answer with OpenAI using only retrieved context.
+RAG: hybrid search (dense + sparse), rerank to top-5, then answer with OpenAI using only retrieved context.
 """
 from __future__ import annotations
 
@@ -12,9 +12,11 @@ from pymilvus import MilvusClient
 import config
 from load_data import (
     COLLECTION_NAME,
+    COLLECTION_NAME_SPARSE,
     EMBEDDING_MODEL,
     embed_texts,
 )
+from sparse_utils import text_to_sparse_vector
 
 logger = logging.getLogger(__name__)
 
@@ -27,8 +29,14 @@ def _repo_to_github_url(repo: str) -> str:
     return f"https://github.com/{repo}"
 
 
-# How many chunks to retrieve for context (before reranker in phase 2)
-RAG_TOP_K = 10
+# Hybrid: fetch this many from dense and from sparse each, then RRF merge (larger pool so OBenner-style Q&A can appear)
+HYBRID_TOP_K = 50
+# After RRF merge, rerank and keep this many for the answer (more chunks = better chance of including Q&A content)
+RERANK_TOP_K = 10
+# Max chunks from a single repo in the final reranked list (reduces single-repo bias)
+MAX_CHUNKS_PER_REPO = 3
+# RRF constant (reciprocal rank fusion)
+RRF_K = 60
 # Model for chat completion (answer from context)
 CHAT_MODEL = "gpt-4o-mini"
 
@@ -41,14 +49,23 @@ def get_openai_client() -> OpenAI:
     return OpenAI(api_key=config.OPENAI_API_KEY)
 
 
+def _chunk_key(c: dict[str, Any]) -> tuple[str, str, str]:
+    """Stable key for deduping chunks across dense and sparse results."""
+    return (
+        (c.get("content") or "").strip(),
+        (c.get("source") or "").strip(),
+        (c.get("repo") or "").strip(),
+    )
+
+
 def search_dense(
     query: str,
     *,
-    top_k: int = RAG_TOP_K,
+    top_k: int = HYBRID_TOP_K,
     collection_name: str = COLLECTION_NAME,
 ) -> list[dict[str, Any]]:
     """
-    Embed query, search Milvus, return list of {content, source, repo}.
+    Embed query, search Milvus dense index, return list of {content, source, repo}.
     """
     openai_client = get_openai_client()
     milvus = get_milvus_client()
@@ -65,7 +82,6 @@ def search_dense(
         output_fields=["content", "source", "repo"],
         search_params=search_params,
     )
-    # res is List[List[dict]]; one query -> one list of hits
     hits = res[0] if res else []
     out = []
     for h in hits:
@@ -76,6 +92,193 @@ def search_dense(
         if content:
             out.append({"content": content, "source": source, "repo": repo})
     return out
+
+
+def search_sparse(
+    query: str,
+    *,
+    top_k: int = HYBRID_TOP_K,
+    collection_name: str = COLLECTION_NAME_SPARSE,
+) -> list[dict[str, Any]]:
+    """
+    Build sparse vector from query, search Milvus sparse index, return list of {content, source, repo}.
+    Returns [] if sparse collection does not exist or search fails.
+    """
+    milvus = get_milvus_client()
+    if not query or not query.strip():
+        return []
+    try:
+        if not milvus.has_collection(collection_name):
+            return []
+    except Exception:
+        return []
+    q_sparse = text_to_sparse_vector(query.strip())
+    if not q_sparse:
+        return []
+    # Milvus sparse search expects list of sparse vectors (each dict {index: value})
+    search_params = {"metric_type": "IP", "params": {}}
+    try:
+        res = milvus.search(
+            collection_name=collection_name,
+            data=[q_sparse],
+            limit=top_k,
+            output_fields=["content", "source", "repo"],
+            search_params=search_params,
+            anns_field="sparse_vector",
+        )
+    except Exception as e:
+        logger.debug("Sparse search failed (e.g. not supported): %s", e)
+        return []
+    hits = res[0] if res else []
+    out = []
+    for h in hits:
+        entity = h.get("entity") or {}
+        content = entity.get("content") or ""
+        source = entity.get("source") or ""
+        repo = entity.get("repo") or ""
+        if content:
+            out.append({"content": content, "source": source, "repo": repo})
+    return out
+
+
+def _rrf_merge(
+    dense: list[dict[str, Any]],
+    sparse: list[dict[str, Any]],
+    k: int = RRF_K,
+) -> list[dict[str, Any]]:
+    """Merge dense and sparse result lists using reciprocal rank fusion; dedupe by chunk key."""
+    scores: dict[tuple[str, str, str], float] = {}
+    chunks_by_key: dict[tuple[str, str, str], dict[str, Any]] = {}
+    for rank, c in enumerate(dense):
+        key = _chunk_key(c)
+        scores[key] = scores.get(key, 0.0) + 1.0 / (k + rank + 1)
+        chunks_by_key[key] = c
+    for rank, c in enumerate(sparse):
+        key = _chunk_key(c)
+        scores[key] = scores.get(key, 0.0) + 1.0 / (k + rank + 1)
+        chunks_by_key[key] = c
+    # Sort by score descending, return chunks in order
+    ordered = sorted(scores.items(), key=lambda x: -x[1])
+    return [chunks_by_key[key] for key, _ in ordered]
+
+
+def _apply_repo_diversity(chunks: list[dict[str, Any]], top_k: int) -> list[dict[str, Any]]:
+    """Limit how many chunks from each repo can appear in the top_k to reduce single-repo bias."""
+    if not chunks or top_k <= 0:
+        return []
+    out: list[dict[str, Any]] = []
+    repo_count: dict[str, int] = {}
+    for c in chunks:
+        if len(out) >= top_k:
+            break
+        repo = (c.get("repo") or "").strip()
+        if repo_count.get(repo, 0) >= MAX_CHUNKS_PER_REPO:
+            continue
+        out.append(c)
+        repo_count[repo] = repo_count.get(repo, 0) + 1
+    # If we have room and skipped some, fill with remaining chunks (no cap) so we still return top_k when possible
+    if len(out) < top_k:
+        seen_keys = {_chunk_key(c) for c in out}
+        for c in chunks:
+            if len(out) >= top_k:
+                break
+            if _chunk_key(c) in seen_keys:
+                continue
+            seen_keys.add(_chunk_key(c))
+            out.append(c)
+    return out
+
+
+def _content_richness_score(content: str) -> float:
+    """
+    Score 0..1 for how much the chunk looks like substantive Q&A (not just a short question list).
+    Longer chunks and chunks with markdown sections / explanatory text get a boost so they
+    outrank short 'here are 3 questions' lists when the user asks for answers.
+    """
+    s = (content or "").strip()
+    if not s:
+        return 0.0
+    # Length: Q&A content (e.g. OBenner spark.md) tends to be long; question-only lists are short
+    length_norm = min(1.0, len(s) / 3000)
+    # Markdown sections (## ) often indicate structured Q&A with answers
+    section_count = s.count("\n## ")
+    section_bonus = min(0.3, section_count * 0.05)
+    return 0.7 * length_norm + section_bonus
+
+
+def _rerank_with_embeddings(
+    query: str,
+    chunks: list[dict[str, Any]],
+    top_k: int = RERANK_TOP_K,
+) -> list[dict[str, Any]]:
+    """Rerank chunks by embedding similarity to query, with a boost for answer-rich (long, structured) content."""
+    if not chunks or top_k <= 0:
+        return []
+    if len(chunks) <= top_k:
+        return chunks
+    openai_client = get_openai_client()
+    texts = [(c.get("content") or "").strip() for c in chunks]
+    if not any(texts):
+        return chunks[:top_k]
+    try:
+        query_emb = embed_texts(openai_client, [query], model=EMBEDDING_MODEL)
+        if not query_emb:
+            return chunks[:top_k]
+        chunk_embs = embed_texts(openai_client, texts, model=EMBEDDING_MODEL)
+        if len(chunk_embs) != len(chunks):
+            return chunks[:top_k]
+    except Exception as e:
+        logger.warning("Rerank embedding failed: %s", e)
+        return chunks[:top_k]
+    q = query_emb[0]
+    # Cosine similarity + boost for content richness (so Q&A chunks outrank short question lists)
+    RICHNESS_WEIGHT = 0.15  # blend: 85% embedding, 15% richness
+    sims = []
+    for i, emb in enumerate(chunk_embs):
+        dot = sum(a * b for a, b in zip(q, emb))
+        norm_q = sum(x * x for x in q) ** 0.5
+        norm_e = sum(x * x for x in emb) ** 0.5
+        cos = (dot / (norm_q * norm_e)) if (norm_q and norm_e) else 0.0
+        richness = _content_richness_score(texts[i])
+        combined = (1.0 - RICHNESS_WEIGHT) * cos + RICHNESS_WEIGHT * richness
+        sims.append((i, combined))
+    sims.sort(key=lambda x: -x[1])
+    ordered = [chunks[i] for i, _ in sims]
+    return _apply_repo_diversity(ordered, top_k)
+
+
+def hybrid_search(
+    query: str,
+    *,
+    top_k_dense: int = HYBRID_TOP_K,
+    top_k_sparse: int = HYBRID_TOP_K,
+    rerank_top: int = RERANK_TOP_K,
+) -> list[dict[str, Any]]:
+    """
+    Run dense + sparse search, merge with RRF, rerank with embeddings, return top rerank_top chunks (default 5).
+    If sparse collection is missing, uses dense-only then reranks.
+    """
+    if not query or not query.strip():
+        return []
+    dense_hits = search_dense(query, top_k=top_k_dense)
+    sparse_hits = search_sparse(query, top_k=top_k_sparse)
+    if dense_hits and sparse_hits:
+        merged = _rrf_merge(dense_hits, sparse_hits)
+    elif dense_hits:
+        merged = dense_hits
+    elif sparse_hits:
+        merged = sparse_hits
+    else:
+        return []
+    reranked = _rerank_with_embeddings(query, merged, top_k=rerank_top)
+    # Log top reranked chunks (server console)
+    for i, c in enumerate(reranked, 1):
+        repo = c.get("repo") or ""
+        source = c.get("source") or ""
+        raw = (c.get("content") or "").strip()
+        preview = (raw[:200] + "…") if len(raw) > 200 else raw
+        logger.info("Reranked chunk %d/%d: repo=%s source=%s preview=%s", i, len(reranked), repo, source, preview[:100])
+    return reranked
 
 
 def answer_with_rag(query: str, chunks: list[dict[str, Any]]) -> tuple[str, list[dict[str, str]]]:

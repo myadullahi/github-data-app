@@ -31,7 +31,16 @@ Second reference flow (also use when testing reranking):
 
 **Bad example (current behavior to improve):** The system cites repos such as `absognety/Interview-Process-Coding-Questions`, `andkret/Cookbook`, or `josephmachado/data_engineering_best_practices` — which often list only questions or homework formats, not full Q&A. The model then says "the context does not contain answers" or points users to docs. That is a **poor outcome**.
 
-**Better source (what we want to surface):** The repo **OBenner/data-engineering-interview-questions** contains actual Q&A content, e.g. in `content/spark.md` (and deep links like `https://github.com/OBenner/data-engineering-interview-questions/blob/master/content/spark.md`). That file has both questions and substantive answers (e.g. repartition vs coalesce, shuffle, memory tuning). As we improve reranking, we want to prefer chunks from such content so the user gets real answers and useful repo links, not "context has no answers."
+**Better source (what we want to surface):** The repo **OBenner/data-engineering-interview-questions** contains actual Q&A content, e.g. in `content/spark.md`. As we improve reranking, we want to prefer chunks from such content so the user gets real answers and useful repo links.
+
+**Good example (target quality):** For *"give me the top-3 data engineering questions on spark"*, a good response includes both the three questions and substantive answers (e.g. what is RDD, Spark vs MapReduce, Spark and Hadoop), with **specific GitHub repo URLs** (not [1]/[2]). Example shape:
+
+- 1. What is RDD and how do you use it? — short answer + source URL  
+- 2. What is the difference between Spark and MapReduce? — short answer + source URL  
+- 3. How does Spark use data from Hadoop? — short answer + source URL  
+- Sources: multiple repos listed with links  
+
+**Source diversity (avoid single-repo bias):** If the model cites only one repo (e.g. andkret/Cookbook) for all answers even when others (e.g. OBenner/data-engineering-interview-questions) are in the retrieved set, that is a **bias** we want to reduce. Rerank uses a per-repo cap so the top chunks are spread across multiple repos when possible.
 
 ---
 

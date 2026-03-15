@@ -81,11 +81,17 @@ def chat(req: ChatRequest):
     if not message:
         return {"answer": "Please provide a non-empty question.", "sources": []}
     try:
-        chunks = rag.search_dense(message)
+        # Use more chunks (10) so answer-rich content is more likely included; LLM gets full content
+        chunks = rag.hybrid_search(message, rerank_top=10)
         answer, sources = rag.answer_with_rag(message, chunks)
-        return {"answer": answer, "sources": sources}
+        # Expose full reranked chunk content so you can verify exactly what the LLM received
+        reranked_chunks = [
+            {"repo": c.get("repo") or "", "source": c.get("source") or "", "content": (c.get("content") or "").strip()}
+            for c in chunks
+        ]
+        return {"answer": answer, "sources": sources, "reranked_chunks": reranked_chunks}
     except Exception as e:
-        return {"answer": f"Sorry, an error occurred: {e!s}", "sources": []}
+        return {"answer": f"Sorry, an error occurred: {e!s}", "sources": [], "reranked_chunks": []}
 
 
 @app.get("/api")
